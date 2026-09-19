@@ -1,0 +1,6 @@
+# Эмуляция Keenetic/Entware: чистый Debian + официальный Entware x64 в /opt.
+# Проверяет пакет netbird из Entware, S99netbird, хук и watchdog. NDM (ndm/netfilter.d вызовы) не эмулируется.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget iproute2 procps psmisc && rm -rf /var/lib/apt/lists/*
+RUN wget -qO- https://bin.entware.net/x64-k3.2/installer/generic.sh | sh
+ENV PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin

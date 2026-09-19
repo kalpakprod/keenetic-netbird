@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+      - run: shellcheck -s sh install.sh uninstall.sh tests/*.sh
+  openwrt:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [openwrt-24, openwrt-25]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tests/run.sh ${{ matrix.target }}
+  entware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo modprobe ip_tables iptable_filter iptable_nat
+      - run: sh tests/run.sh entware

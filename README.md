@@ -1,18 +1,23 @@
-# NetBird на Keenetic (Entware)
+# NetBird на роутере: Keenetic (Entware) и OpenWrt
 
-Установка одной командой. После перезагрузки роутер сам поднимает NetBird и остаётся доступен через туннель.
+[![ci](https://github.com/kalpakprod/keenetic-netbird/actions/workflows/ci.yml/badge.svg)](https://github.com/kalpakprod/keenetic-netbird/actions/workflows/ci.yml)
 
-Архитектуры: aarch64, armv7, mipsel, mips (пакет `netbird` есть в официальном репозитории Entware для всех).
+Один скрипт ставит NetBird-клиент на роутер так, чтобы после перезагрузки туннель поднимался сам и роутер оставался доступен из сети NetBird. Платформа определяется автоматически. Никаких сторонних бинарей: пакет `netbird` берётся из официального репозитория Entware или OpenWrt.
 
-## Требования (веб-интерфейс Keenetic)
+**Зачем.** Постоянный удалённый доступ к роутеру и домашней сети без проброса портов и белого IP. NetBird сам пробивает NAT, роутер становится обычным пиром в вашей mesh-сети.
 
-1. Установлен [Entware на USB](https://help.keenetic.com/hc/ru/articles/360021214160).
-2. Установлен компонент **WireGuard VPN** (Параметры системы -> Компоненты). Он даёт `/dev/net/tun`.
-3. В панели NetBird создан **Setup Key**.
+## Быстрый старт
 
-## Установка
+Нужен **Setup Key** из панели NetBird (Setup Keys -> Add key, лучше reusable).
 
-SSH в Entware (порт 222, пользователь root):
+### Keenetic
+
+Предварительно в веб-интерфейсе:
+
+1. [Entware на USB или встроенное хранилище](https://help.keenetic.com/hc/ru/articles/360021214160). С KeeneticOS 4.2 одной командой в CLI (`192.168.1.1/a`): `opkg disk storage:/ https://bin.entware.net/<arch>/installer/<arch>-installer.tar.gz` (архитектуру см. в таблице ниже).
+2. Компонент **WireGuard VPN** (Управление -> Параметры системы -> Компоненты). Он даёт `/dev/net/tun`. Без него скрипт остановится с понятной ошибкой.
+
+Затем по SSH в Entware (порт **222**, пользователь `root`, пароль по умолчанию `keenetic`):
 
 ```sh
 opkg update && opkg install curl ca-bundle
@@ -20,27 +25,119 @@ curl -fsSL https://raw.githubusercontent.com/kalpakprod/keenetic-netbird/main/in
 sh /tmp/nb.sh <SETUP_KEY>
 ```
 
-Self-hosted NetBird: `sh /tmp/nb.sh <SETUP_KEY> https://netbird.example.com`
+### OpenWrt
+
+По SSH на роутер (порт 22, `root`):
+
+```sh
+wget -qO /tmp/nb.sh https://raw.githubusercontent.com/kalpakprod/keenetic-netbird/main/install.sh
+sh /tmp/nb.sh <SETUP_KEY>
+```
+
+Работает на 24.10 (opkg) и 25.12 (apk). Оба проверяются в CI на каждый коммит.
+
+### Self-hosted NetBird
+
+```sh
+sh /tmp/nb.sh <SETUP_KEY> https://netbird.example.com
+```
 
 ## Проверка
 
 ```sh
-netbird status        # Management: Connected
+netbird status          # Management: Connected, Signal: Connected
 reboot
 ```
 
-Через 2 минуты с любого другого пира NetBird: `ssh -p 222 root@<NetBird-IP роутера>`.
+Через 2 минуты с любого другого пира NetBird:
 
-## Что ставится и почему это живёт после перезагрузки
-
-| Файл | Назначение |
+| Платформа | Команда |
 |---|---|
-| `/opt/etc/init.d/S99netbird` | штатный автозапуск из пакета Entware; состояние и ключи в `/opt/var/lib/netbird` на USB |
-| `/opt/etc/netbird/env` | флаги демона (лог в `/opt/var/log/netbird.log`) |
-| `/opt/etc/ndm/netfilter.d/netbird.sh` | хук KeeneticOS: при каждой пересборке фаервола (загрузка, смена WAN, любое изменение в веб-интерфейсе) заново разрешает INPUT на `wt0` (22, 222, 80, 443, icmp), FORWARD wt0<->br0, MASQUERADE и ставит `rp_filter=0`. Без него демон живёт, но зайти на роутер нельзя |
-| `/opt/etc/netbird/watchdog.sh` + cron | каждые 2 минуты перезапускает демон, если процесс умер (OOM на роутере) |
+| Keenetic, шелл Entware | `ssh -p 222 root@<NetBird-IP роутера>` |
+| Keenetic, CLI KeeneticOS | `ssh admin@<NetBird-IP роутера>` (если SSH-сервер включён в компонентах) |
+| Keenetic, веб-интерфейс | `http://<NetBird-IP роутера>` |
+| OpenWrt | `ssh root@<NetBird-IP роутера>`, LuCI по `http://<NetBird-IP>` |
 
-`--disable-dns`: NetBird не трогает DNS роутера, домашняя сеть не теряет резолв.
+NetBird-IP роутера скрипт печатает в конце; всегда виден в панели NetBird.
+
+## Архитектуры Keenetic
+
+Пакет `netbird` есть во всех репозиториях Entware, которые использует Keenetic (проверено по `bin.entware.net/<arch>/Packages`, версия 0.66.4 на сентябрь 2026). Ограничение "NetBird не собирается под MIPS" касается только официальных GitHub-релизов NetBird; Entware собирает свой пакет.
+
+| SoC | Примеры моделей | `uname -m` | Репозиторий Entware |
+|---|---|---|---|
+| MediaTek MT7621, MT7628 | Giga (KN-1010/1011), Ultra (KN-1810), Viva, Hero 4G, Runner 4G, Speedster, Air, Extra, Omni, Start, Lite | `mips` (little-endian, это mipsel) | `mipselsf-k3.4` |
+| MediaTek MT7622 | Peak (KN-2710), Titan (KN-1811), Hopper (KN-3810) | `aarch64` | `aarch64-k3.10` |
+| MediaTek MT7981, MT7986, MT7988 | Sprinter, Skipper, Hero 4G+, Giga Pro и другие Wi-Fi 6/7 модели | `aarch64` | `aarch64-k3.10` |
+
+Проверить свою: в шелле Entware `uname -m; cat /proc/cpuinfo | head -5`. Список моделей ориентировочный, точный SoC своей модели смотри на [keenetic.com/ru/support](https://help.keenetic.com/) или в `/proc/cpuinfo`. Скрипт печатает архитектуру первой строкой и сам проверяет, что пакет для неё существует.
+
+## Версии KeeneticOS
+
+| KeeneticOS | Что важно |
+|---|---|
+| 4.2 и новее | Entware ставится одной командой из CLI; компонент WireGuard есть. Основная целевая версия. |
+| 4.0, 4.1 | Entware ставится через веб-интерфейс (папка `install` на накопителе); WireGuard есть с 3.3. |
+| 3.x | WireGuard появился в 3.3. Хуки `/opt/etc/ndm/netfilter.d` работают, но сборка Entware может быть старой: сделай `opkg update && opkg upgrade` перед установкой. Не проверялось. |
+| 2.x | Не поддерживается: нет компонента WireGuard, нет `/dev/net/tun`. |
+
+Хуки ndm (`/opt/etc/ndm/netfilter.d/*.sh`) поддерживаются KeeneticOS начиная с 2.x и не менялись до 4.x, это документированный механизм Keenetic для Entware-скриптов.
+
+## Что именно делает скрипт
+
+### Keenetic (ветка `install_keenetic`)
+
+| Что | Где | Зачем |
+|---|---|---|
+| `opkg install netbird iptables cron` | Entware | официальный пакет; `iptables` для правил, `cron` для watchdog |
+| Флаги демона | `/opt/etc/netbird/env` | читается штатным `S99netbird` из пакета; лог в `/opt/var/log/netbird.log` |
+| Автозапуск | `/opt/etc/init.d/S99netbird` | ставится пакетом Entware; стартует при загрузке роутера, ключи и конфиг в `/opt/var/lib/netbird` и `/opt/etc/netbird/config.json` на накопителе |
+| Хук фаервола | `/opt/etc/ndm/netfilter.d/netbird.sh` | KeeneticOS вызывает его при каждой пересборке netfilter (загрузка, смена WAN, любое изменение в веб-интерфейсе). Разрешает INPUT на `wt0` (icmp + порты из `NB_PORTS`, по умолчанию 22 222 80 443), FORWARD wt0<->br0, MASQUERADE для 100.64.0.0/10, ставит `rp_filter=0`. Без него демон живёт, но зайти на роутер через туннель нельзя |
+| Watchdog | `/opt/etc/netbird/watchdog.sh` + `/opt/etc/crontab` | каждые 2 минуты перезапускает демон, если процесс умер (OOM на роутере с 128-256 MB бывает) |
+| `netbird up --disable-dns` | | NetBird не трогает DNS роутера, домашняя сеть не теряет резолв |
+
+### OpenWrt (ветка `install_openwrt`)
+
+| Что | Где | Зачем |
+|---|---|---|
+| `apk add netbird` или `opkg install netbird` | официальный фид OpenWrt | тянет `kmod-wireguard` зависимостью |
+| Интерфейс | `uci network.netbird` proto `unmanaged`, device `wt0` | чтобы фаервол мог привязать зону к устройству NetBird |
+| Зона фаервола | `uci firewall.netbird` + forwarding netbird<->lan | input/forward ACCEPT для трафика из mesh, masq для доступа в LAN. Всё в `/etc/config`, переживает reboot и sysupgrade с сохранением настроек |
+| Автозапуск | `/etc/init.d/netbird enable` | procd-сервис из пакета |
+
+Соответствует официальной инструкции [docs.netbird.io/get-started/install/openwrt](https://docs.netbird.io/get-started/install/openwrt).
+
+### Переменные окружения
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `NB_PLATFORM` | автоопределение | `keenetic` или `openwrt` принудительно |
+| `NB_NO_UP` | | `1`: поставить всё, но не выполнять `netbird up` (для CI) |
+| `NB_LAN` | `br0` | LAN-интерфейс Keenetic (для гостевого сегмента другой) |
+| `NB_PORTS` | `22 222 80 443` | порты роутера, открываемые из сети NetBird (Keenetic) |
+| `NB_UP_FLAGS` | | дополнительные флаги к `netbird up`, например `--disable-firewall` |
+
+Пример: `NB_PORTS="222" sh /tmp/nb.sh <KEY>` откроет из mesh только SSH в Entware.
+
+## Почему ветки разные и нельзя перенести OpenWrt-вариант на Keenetic
+
+OpenWrt: procd, uci, netfilter под управлением fw4. NetBird там ставится штатно, зона фаервола описывается декларативно и сама переживает перезагрузку.
+
+KeeneticOS: закрытая система, нет uci и procd. Entware живёт в `/opt` и стартует через `/opt/etc/init.d/S*`. Фаервол собирает демон `ndm`, при каждой пересборке он затирает чужие правила, поэтому Keenetic предоставляет хуки `/opt/etc/ndm/netfilter.d/` именно для этого случая. Один скрипт, две ветки, каждая на штатных механизмах своей системы.
+
+## Как это тестируется
+
+`tests/run.sh` прогоняет полный цикл install -> assert -> uninstall в Docker:
+
+| Цель | Образ | Что проверяется |
+|---|---|---|
+| `openwrt-24` | `openwrt/rootfs:x86-64-24.10.8` | пакет через opkg, `/etc/rc.d/S99netbird`, uci-интерфейс и зона, идемпотентность повторного запуска, полное удаление |
+| `openwrt-25` | `openwrt/rootfs:x86-64-25.12.4` | то же через apk |
+| `entware` | Debian + официальный Entware x64 в `/opt` | пакет из Entware, `S99netbird`, env, хук: синтаксис, реальные правила iptables, идемпотентность при повторных вызовах (нет дубликатов), watchdog в cron, stop/start демона как эмуляция перезагрузки |
+
+Локально: `sh tests/run.sh all` (нужен Docker; для `entware` на хосте нужны модули `ip_tables iptable_filter iptable_nat`). В CI (`.github/workflows/ci.yml`) плюс `shellcheck -s sh`.
+
+Что Docker не покрывает и проверяется только на железе: сам вызов хука демоном ndm, `/dev/net/tun` от компонента WireGuard, реальный `netbird up`. Если после `reboot` `netbird status` показывает ошибку, пришли `tail -50 /opt/var/log/netbird.log` (Keenetic) или `logread -e netbird` (OpenWrt) в issue.
 
 ## Удаление
 
@@ -48,8 +145,22 @@ reboot
 curl -fsSL https://raw.githubusercontent.com/kalpakprod/keenetic-netbird/main/uninstall.sh | sh
 ```
 
+Снимает пакет, хук, watchdog, uci-объекты и состояние. На Keenetic правила iptables для `wt0` исчезают при следующей пересборке фаервола или после `reboot`.
+
+## Известные ограничения
+
+- `--disable-dns` включён всегда: NetBird DNS (резолв имён пиров `*.netbird.cloud`) на роутере не работает. Имена пиров резолвятся на других устройствах, роутеру они не нужны.
+- Политики доступа NetBird применяются на management-стороне и на пирах; сам роутер фильтрует входящий из mesh трафик только по `NB_PORTS`.
+- Keenetic с 128 MB RAM: бинарь netbird занимает ~35-40 MB на диске и 30-60 MB в памяти. На таких моделях watchdog нужен, OOM реален.
+
 ## Источники
 
-- Пакет: официальный репозиторий Entware, `bin.entware.net/<arch>/Packages`, Maintainer: Entware team.
-- Хук netfilter: [forum.keenetic.ru/topic/21273-netbird](https://forum.keenetic.ru/topic/21273-netbird/).
-- Entware и скрипты ndm: [help.keenetic.com](https://help.keenetic.com/hc/ru/articles/360021214160).
+- Пакет Entware: `https://bin.entware.net/<arch>/Packages`, Maintainer: Entware team. Содержимое ipk проверено распаковкой: `/opt/sbin/netbird`, `/opt/etc/init.d/S99netbird`, `/opt/etc/netbird/env`.
+- Пакет OpenWrt: [openwrt/packages net/netbird](https://github.com/openwrt/packages/tree/master/net/netbird).
+- Хук netfilter для Keenetic: [forum.keenetic.ru/topic/21273-netbird](https://forum.keenetic.ru/topic/21273-netbird/).
+- Entware на Keenetic и архитектуры: [help.keenetic.com](https://help.keenetic.com/hc/ru/articles/360021214160), [keeneticported.dev/wiki/helpful/entware](https://keeneticported.dev/wiki/helpful/entware).
+- NetBird на OpenWrt: [docs.netbird.io/get-started/install/openwrt](https://docs.netbird.io/get-started/install/openwrt).
+
+## Лицензия
+
+MIT.
