@@ -1,6 +1,6 @@
 # NetBird на роутере: Keenetic (Entware) и OpenWrt
 
-[![ci](https://github.com/kalpakprod/keenetic-netbird/actions/workflows/ci.yml/badge.svg)](https://github.com/kalpakprod/keenetic-netbird/actions/workflows/ci.yml)
+[![ci](https://github.com/kalpakprod/netbird-keenetic-openwrt/actions/workflows/ci.yml/badge.svg)](https://github.com/kalpakprod/netbird-keenetic-openwrt/actions/workflows/ci.yml)
 
 Один скрипт ставит NetBird-клиент на роутер так, чтобы после перезагрузки туннель поднимался сам и роутер оставался доступен из сети NetBird. Платформа определяется автоматически. Никаких сторонних бинарей: пакет `netbird` берётся из официального репозитория Entware или OpenWrt.
 
@@ -21,7 +21,7 @@
 
 ```sh
 opkg update && opkg install curl ca-bundle
-curl -fsSL https://raw.githubusercontent.com/kalpakprod/keenetic-netbird/main/install.sh -o /tmp/nb.sh
+curl -fsSL https://raw.githubusercontent.com/kalpakprod/netbird-keenetic-openwrt/main/install.sh -o /tmp/nb.sh
 sh /tmp/nb.sh <SETUP_KEY>
 ```
 
@@ -30,7 +30,7 @@ sh /tmp/nb.sh <SETUP_KEY>
 По SSH на роутер (порт 22, `root`):
 
 ```sh
-wget -qO /tmp/nb.sh https://raw.githubusercontent.com/kalpakprod/keenetic-netbird/main/install.sh
+wget -qO /tmp/nb.sh https://raw.githubusercontent.com/kalpakprod/netbird-keenetic-openwrt/main/install.sh
 sh /tmp/nb.sh <SETUP_KEY>
 ```
 
@@ -142,7 +142,7 @@ KeeneticOS: закрытая система, нет uci и procd. Entware жив
 ## Удаление
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kalpakprod/keenetic-netbird/main/uninstall.sh | sh
+curl -fsSL https://raw.githubusercontent.com/kalpakprod/netbird-keenetic-openwrt/main/uninstall.sh | sh
 ```
 
 Снимает пакет, хук, watchdog, uci-объекты и состояние. На Keenetic правила iptables для `wt0` исчезают при следующей пересборке фаервола или после `reboot`.
