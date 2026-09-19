@@ -114,7 +114,7 @@ EOF_WD
   chmod +x "$WD"
   touch /opt/etc/crontab
   grep -q "$WD" /opt/etc/crontab || echo "*/2 * * * * root $WD" >> /opt/etc/crontab
-  [ -x /opt/etc/init.d/S10cron ] && /opt/etc/init.d/S10cron restart >/dev/null 2>&1 || true
+  if [ -x /opt/etc/init.d/S10cron ]; then /opt/etc/init.d/S10cron restart >/dev/null 2>&1 || true; fi
 
   log "[6/6] запуск демона и регистрация пира"
   /opt/etc/init.d/S99netbird restart
