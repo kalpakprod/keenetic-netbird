@@ -213,6 +213,9 @@ install_watchdog() {
   mkdir -p /opt/etc/netbird /opt/var/log
   cat > "$WD" <<'EOF_WD'
 #!/bin/sh
+export PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Под cron PATH обрезан и там нет ни pidof, ни date: без этой строки watchdog
+# рестартит живой демон каждые 2 минуты (поймано на железе).
 # Пока установщик держит lock, демона не трогаем: рестарт посреди стейджинга
 # меняет бинарь под живым процессом и портит pidfile (поймано на железе).
 [ -d /opt/var/lock/netbird-install ] && exit 0

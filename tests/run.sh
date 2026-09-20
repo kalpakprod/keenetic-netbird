@@ -75,6 +75,15 @@ run_upstream() {
     /opt/etc/netbird/watchdog.sh; sleep 3
     pidof netbird >/dev/null || { echo "watchdog did not restart after unlock"; exit 1; }
     echo "Watchdog-lock: OK"
+    echo "--- watchdog under cron env (PATH stripped)"
+    P1=$(pidof netbird)
+    N1=$(wc -l < /opt/var/log/netbird_watchdog.log)
+    env -i SHELL=/bin/sh PATH=/nonexistent /opt/etc/netbird/watchdog.sh
+    P2=$(pidof netbird)
+    [ "$P1" = "$P2" ] || { echo "watchdog restarted healthy daemon under cron env"; exit 1; }
+    N2=$(wc -l < /opt/var/log/netbird_watchdog.log)
+    [ "$N1" = "$N2" ] || { echo "watchdog logged under cron env"; exit 1; }
+    echo "Watchdog-cronenv: OK"
     echo "--- S99 heals stale pidfile (F2)"
     echo 999999 > /opt/var/run/netbird-upstream.pid
     /opt/etc/init.d/S99netbird restart >/dev/null; sleep 3
