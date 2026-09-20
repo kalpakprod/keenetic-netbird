@@ -130,6 +130,8 @@ mgmt_probe() {
 # Ключ из аргумента кладётся в 600-файл и удаляется сразу после вызова "up".
 register_peer() {
   [ -n "$NB_NO_UP" ] && { log "NB_NO_UP задан: пропускаю netbird up"; return; }
+  # Валидируем до создания файла с ключом, иначе fail оставит секрет в /tmp.
+  check_hostname
   KEYFILE="${NB_SETUP_KEY_FILE:-}"
   STAGED=0
   if [ -z "$KEYFILE" ] && [ -n "$SCRIPT_KEY" ]; then
@@ -141,7 +143,6 @@ register_peer() {
   fi
   if [ ! -s "$KEYFILE" ]; then fail "нужен Setup Key: sh install.sh <SETUP_KEY> [MANAGEMENT_URL]"; fi
   HN_FLAGS=""
-  check_hostname
   if [ -n "${NB_HOSTNAME:-}" ]; then HN_FLAGS="--hostname $NB_HOSTNAME"; fi
   wait_daemon
   # На медленных роутерах CLI может отвалиться по таймауту gRPC (DeadlineExceeded),

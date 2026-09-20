@@ -9,6 +9,7 @@ SRC=$(awk '/^PLATFORM=\$\(detect_platform\)$/ {exit} {print}' install.sh)
 if [ -z "$SRC" ]; then echo "FAIL: не найден маркер PLATFORM=\$(detect_platform)"; exit 1; fi
 pass=0
 fail=0
+BEFORE_KEYS=$(ls /tmp/netbird-setup-key.* 2>/dev/null || true)
 case_run() {
   if [ "$3" = 1 ]; then ADDR='    inet 100.64.1.2/16 scope global wt0'; else ADDR=''; fi
   STUB="netbird() { if [ \"\$1\" = up ]; then return $2; fi; echo 'Management: $4'; }
@@ -65,6 +66,12 @@ if [ "$code" != 0 ]; then
   echo "  ok  bad hostname rejected"; pass=$((pass+1))
 else
   echo "  FAIL bad hostname accepted"; fail=$((fail+1))
+fi
+AFTER_KEYS=$(ls /tmp/netbird-setup-key.* 2>/dev/null || true)
+if [ "$BEFORE_KEYS" = "$AFTER_KEYS" ]; then
+  echo "  ok  no staged key leaked"; pass=$((pass+1))
+else
+  echo "  FAIL staged key leaked"; fail=$((fail+1))
 fi
 echo "register_peer: pass=$pass fail=$fail"
 [ "$fail" = 0 ]
