@@ -9,6 +9,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker run --rm -v "$PWD:/src:ro" -w /src koalaman/shellcheck:stable -s sh install.sh uninstall.sh tests/*.sh
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tests/test-register-peer.sh && sh tests/test-source-select.sh
   openwrt:
     runs-on: ubuntu-latest
     strategy:
@@ -23,3 +28,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo modprobe ip_tables iptable_filter iptable_nat
       - run: sh tests/run.sh entware
+  upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo modprobe ip_tables iptable_filter iptable_nat
+      - run: sh tests/run.sh upstream
