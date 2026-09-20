@@ -31,5 +31,40 @@ case_run 'connected' 0 1 'Connected' 1
 case_run 'up error then connected' 1 1 'Connected' 1
 case_run 'stale address disconnected' 1 1 'Disconnected' 0
 case_run 'no address' 1 0 'Disconnected' 0
+# NB_HOSTNAME пробрасывается в netbird up, мусор отвергается
+STUB="netbird() { printf '%s\n' \"\$*\" >> \"\$CAPTURE\"; if [ \"\$1\" = up ]; then return 0; fi; echo 'Management: Connected'; }
+ip() { echo '    inet 100.64.1.2/16 scope global wt0'; }
+sleep() { :; }
+register_peer test-log root"
+CAPFILE=$(mktemp)
+code=0; CAPTURE="$CAPFILE" NB_HOSTNAME=peer-test-01 sh -s dummy-key <<EOF_INNER >/dev/null 2>&1 || code=$?
+$SRC
+$STUB
+EOF_INNER
+if [ "$code" = 0 ] && grep -q -- '--hostname peer-test-01' "$CAPFILE"; then
+  echo "  ok  hostname passed to up"; pass=$((pass+1))
+else
+  echo "  FAIL hostname not passed (exit=$code)"; fail=$((fail+1))
+fi
+: > "$CAPFILE"
+code=0; CAPTURE="$CAPFILE" sh -s dummy-key <<EOF_INNER >/dev/null 2>&1 || code=$?
+$SRC
+$STUB
+EOF_INNER
+if [ "$code" = 0 ] && ! grep -q -- '--hostname' "$CAPFILE"; then
+  echo "  ok  no hostname by default"; pass=$((pass+1))
+else
+  echo "  FAIL hostname leaked by default"; fail=$((fail+1))
+fi
+rm -f "$CAPFILE"
+code=0; NB_HOSTNAME='bad name' sh -s dummy-key <<EOF_INNER >/dev/null 2>&1 || code=$?
+$SRC
+$STUB
+EOF_INNER
+if [ "$code" != 0 ]; then
+  echo "  ok  bad hostname rejected"; pass=$((pass+1))
+else
+  echo "  FAIL bad hostname accepted"; fail=$((fail+1))
+fi
 echo "register_peer: pass=$pass fail=$fail"
 [ "$fail" = 0 ]

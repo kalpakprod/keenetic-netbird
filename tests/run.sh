@@ -50,6 +50,21 @@ run_upstream() {
     opkg update >/dev/null && opkg install curl ca-bundle >/dev/null
     NB_PLATFORM=keenetic NB_SOURCE=upstream NB_NO_UP=1 sh /tmp/install.sh
     sh /src/tests/assert-upstream.sh
+    /opt/etc/init.d/S99netbird stop >/dev/null; sleep 1
+    echo "--- переустановка: NB_COMPRESS=1 на имитации забитого /opt"
+    REAL_DF=$(command -v df)
+    mkdir -p /tmp/fakebin
+    printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n" "#!/bin/sh" "if [ \"\$2\" = /opt ] && [ -f /opt/lib/netbird/netbird ]; then" "echo \"Filesystem 1K-blocks Used Avail Use Mounted\"" "echo \"ubi 68120 67120 1000 99% /opt\"" "else" "exec $REAL_DF \"\$@\"" "fi" > /tmp/fakebin/df
+    chmod +x /tmp/fakebin/df
+    export PATH="/tmp/fakebin:$PATH"
+    OUT=$(NB_PLATFORM=keenetic NB_SOURCE=upstream NB_COMPRESS=1 NB_NO_UP=1 sh /tmp/install.sh 2>&1) || { echo "$OUT"; echo "переустановка с NB_COMPRESS=1 не удалась"; exit 1; }
+    echo "$OUT" | grep -q "места впритык" || { echo "нет переупорядочивания при тесном /opt"; exit 1; }
+    echo "$OUT" | grep -q "сжато:" || { echo "нет строки про сжатие"; exit 1; }
+    SZ=$(wc -c < /opt/lib/netbird/netbird)
+    [ "$SZ" -lt 20000000 ] || { echo "бинарь не сжат: $SZ байт"; exit 1; }
+    /opt/bin/netbird version >/dev/null 2>&1 || { echo "сжатый бинарь не запускается"; exit 1; }
+    rm -f /tmp/fakebin/df
+    echo "Compress+tight: OK ($SZ байт)"
     NB_PLATFORM=keenetic sh /tmp/uninstall.sh
     ! test -e /opt/lib/netbird/netbird || { echo "upstream-бинарь остался"; exit 1; }
     ! test -e /opt/bin/netbird || { echo "враппер остался"; exit 1; }

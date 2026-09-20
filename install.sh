@@ -10,10 +10,13 @@
 #                              через GitHub API с откатом на проверенную при неудаче)
 #   NB_ARCH=arm64                  принудительно выбрать архитектуру upstream-бинаря (экспертный режим)
 #   NB_LOG_LEVEL=warning           уровень лога демона на Keenetic: trace|debug|info|warn|warning|error
+#   NB_COMPRESS=1                сжать upstream-бинарь через UPX (~40 МБ -> ~14 МБ) для тесного /opt
+#   NB_HOSTNAME=peer-01            имя пира в панели NetBird (A-Z a-z 0-9 . _ -)
 #   NB_SETUP_KEY_FILE=/path        файл с Setup Key (вместо первого аргумента)
 #   NB_LAN=br0                     LAN-интерфейс Keenetic (по умолчанию br0)
 #   NB_PORTS="22 222 80 443"       порты роутера, открываемые из сети NetBird (Keenetic)
 #   NB_UP_FLAGS="..."              дополнительные флаги к "netbird up"
+#   NB_SKIP_PREFLIGHT=1            не останавливаться, если management недоступен (экспертный режим)
 set -e
 
 SCRIPT_KEY="$1"
@@ -27,8 +30,21 @@ NB_LOG_LEVEL="${NB_LOG_LEVEL:-warning}"
 PINNED_VERSION=0.79.0
 export PATH="/opt/bin:/opt/sbin:$PATH"
 
+# Цвета только на живом терминале; в логах, CI и тестах их нет.
+if [ -t 1 ]; then
+  C_GREEN=$(printf '\033[32m'); C_RED=$(printf '\033[31m')
+  C_YELLOW=$(printf '\033[33m'); C_CYAN=$(printf '\033[36m')
+  C_NC=$(printf '\033[0m')
+else
+  C_GREEN=""; C_RED=""; C_YELLOW=""; C_CYAN=""; C_NC=""
+fi
+
 log()  { printf '%s\n' "$*"; }
-fail() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
+fail() { printf '%sОШИБКА%s: %s\n' "$C_RED" "$C_NC" "$*" >&2; exit 1; }
+banner()   { printf '\n%s%s%s\n\n' "$C_CYAN" "$1" "$C_NC"; }
+pre_ok()   { printf '%s  [OK] %s%s %s\n' "$C_GREEN" "$C_NC" "$1" "$2"; }
+pre_warn() { printf '%s  [!!] %s%s %s\n' "$C_YELLOW" "$C_NC" "$1" "$2"; }
+pre_skip() { printf '  [--] %s %s\n' "$1" "$2"; }
 
 detect_platform() {
   [ -n "$NB_PLATFORM" ] && { echo "$NB_PLATFORM"; return; }
@@ -67,6 +83,49 @@ wait_daemon() {
   until netbird status >/dev/null 2>&1 || [ $i -ge 20 ]; do sleep 1; i=$((i+1)); done
 }
 
+check_hostname() {
+  if [ -n "${NB_HOSTNAME:-}" ]; then
+    case "$NB_HOSTNAME" in *[!A-Za-z0-9._-]*) fail "NB_HOSTNAME: только A-Z a-z 0-9 . _ -" ;; esac
+  fi
+}
+
+# Возвращает 0, если URL отвечает по HTTP. Код 2: нечем проверить (нет curl/wget).
+http_ok() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSI --max-time 15 -o /dev/null "$1" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --spider --timeout=15 "$1" 2>/dev/null
+  else
+    return 2
+  fi
+}
+
+# Проверка доступности management. Любой HTTP-ответ (даже 401/404) означает,
+# что весь стек (DNS, TCP, TLS, HTTP) работает. TLS-ошибка = предупреждение
+# (похоже на самоподписанный серт self-hosted); DNS/сеть/таймаут = фатально.
+mgmt_probe() {
+  if [ -n "${NB_SKIP_PREFLIGHT:-}" ]; then pre_skip "management $MGMT" "(пропуск по NB_SKIP_PREFLIGHT)"; return 0; fi
+  if command -v curl >/dev/null 2>&1; then
+    rc=0; out=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$MGMT/api/peers" 2>/dev/null) || rc=$?
+    if [ "$rc" = 0 ]; then pre_ok "management $MGMT" "(HTTP $out)"; return 0; fi
+    if [ "$rc" = 60 ] || [ "$rc" = 51 ]; then
+      pre_warn "management $MGMT" "(TLS-сертификат не проверен; для self-hosted с самоподписанным — нормально)"
+      return 0
+    fi
+    fail "management $MGMT недоступен (curl код $rc): проверь интернет на роутере и адрес; регистрация не выйдет. Обход: NB_SKIP_PREFLIGHT=1"
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -q --spider --timeout=15 "$MGMT/api/peers" 2>/dev/null; then pre_ok "management $MGMT" ""; return 0; fi
+    if wget -q --spider --no-check-certificate --timeout=15 "$MGMT/api/peers" 2>/dev/null; then
+      pre_warn "management $MGMT" "(TLS-сертификат не проверен; для self-hosted с самоподписанным — нормально)"
+      return 0
+    fi
+    fail "management $MGMT недоступен: проверь интернет на роутере и адрес; регистрация не выйдет. Обход: NB_SKIP_PREFLIGHT=1"
+  else
+    pre_warn "management $MGMT" "(нечем проверить: нет curl/wget)"
+    return 0
+  fi
+}
+
 # Использует $SCRIPT_KEY или $NB_SETUP_KEY_FILE; значение ключа никогда не печатает.
 # Ключ из аргумента кладётся в 600-файл и удаляется сразу после вызова "up".
 register_peer() {
@@ -81,12 +140,15 @@ register_peer() {
     STAGED=1
   fi
   if [ ! -s "$KEYFILE" ]; then fail "нужен Setup Key: sh install.sh <SETUP_KEY> [MANAGEMENT_URL]"; fi
+  HN_FLAGS=""
+  check_hostname
+  if [ -n "${NB_HOSTNAME:-}" ]; then HN_FLAGS="--hostname $NB_HOSTNAME"; fi
   wait_daemon
   # На медленных роутерах CLI может отвалиться по таймауту gRPC (DeadlineExceeded),
   # хотя демон продолжает регистрацию. Поэтому код возврата up не решает; решают
   # адрес на wt0 и "Management: Connected" в netbird status.
   # shellcheck disable=SC2086
-  netbird up --setup-key-file "$KEYFILE" --management-url "$MGMT" --disable-dns $NB_UP_FLAGS || \
+  netbird up --setup-key-file "$KEYFILE" --management-url "$MGMT" --disable-dns $NB_UP_FLAGS $HN_FLAGS || \
     log "netbird up вернул ошибку, жду фактического подключения до 120 с"
   if [ "$STAGED" = 1 ]; then rm -f "$KEYFILE"; fi
   IP=""; i=0
@@ -169,19 +231,32 @@ EOF_WD
 }
 
 # ---------------------------------------------------------------- Keenetic (Entware)
-install_keenetic() {
+# Все проверки до любых изменений: в конце известны SOURCE, UARCH и VERSION.
+preflight_keenetic() {
+  banner "Предпроверки: убеждаемся, что установка вообще возможна"
   [ "$(id -u)" = 0 ] || fail "нужен root"
+  pre_ok "root" ""
   [ -d /opt/etc/init.d ] || fail "нужен Entware"
-  [ -c /dev/net/tun ] || [ -n "$NB_NO_UP" ] || \
+  pre_ok "Entware" ""
+  if [ -c /dev/net/tun ]; then
+    pre_ok "/dev/net/tun" ""
+  elif [ -n "$NB_NO_UP" ]; then
+    pre_skip "/dev/net/tun" "(нет, но NB_NO_UP)"
+  else
     fail "нет /dev/net/tun: установи компонент 'WireGuard VPN' (Параметры системы -> Компоненты) и повтори"
+  fi
   if [ -z "$NB_NO_UP" ]; then
     if [ -z "$SCRIPT_KEY" ] && [ ! -s "${NB_SETUP_KEY_FILE:-}" ]; then
       fail "нужен Setup Key: sh install.sh <SETUP_KEY> [MANAGEMENT_URL]"
     fi
+    pre_ok "Setup Key" "(значение не показываю)"
+  else
+    pre_skip "Setup Key" "(не нужен: NB_NO_UP)"
   fi
   case "$NB_SOURCE" in auto|upstream|entware) ;; *) fail "NB_SOURCE: auto|upstream|entware" ;; esac
   case "$NB_LOG_LEVEL" in trace|debug|info|warn|warning|error) ;; *) fail "NB_LOG_LEVEL: trace|debug|info|warn|warning|error" ;; esac
-
+  check_hostname
+  pre_ok "переменные" "SOURCE=$NB_SOURCE VERSION=$NB_VERSION LOG=$NB_LOG_LEVEL"
   SOURCE="$NB_SOURCE"
   UARCH=""
   if [ "$SOURCE" = auto ]; then
@@ -190,6 +265,58 @@ install_keenetic() {
     UARCH=$(map_upstream_arch 2>/dev/null) || \
       fail "для $(uname -m) нет проверенного upstream-бинаря; убери NB_SOURCE=upstream (авто выберет Entware) или задай NB_ARCH вручную"
   fi
+  if [ "$SOURCE" = upstream ]; then
+    pre_ok "источник" "upstream ($UARCH)"
+  else
+    pre_ok "источник" "пакет Entware"
+  fi
+  if [ -n "${NB_COMPRESS:-}" ] && [ "$SOURCE" = entware ]; then
+    pre_warn "NB_COMPRESS=1" "(действует только на upstream-источник; пакет Entware ставится как есть)"
+  fi
+  opkg update >/dev/null 2>&1 || fail "opkg update не удался: проверь интернет на роутере"
+  pre_ok "opkg update" ""
+  if [ "$SOURCE" = upstream ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      opkg install curl ca-bundle >/dev/null 2>&1 || fail "не ставится curl: проверь интернет и свободное место"
+    fi
+    command -v curl >/dev/null || fail "не ставится curl"
+    pre_ok "curl" ""
+    VERSION=$(resolve_version)
+    case "$VERSION" in ''|*[!0-9.]*) fail "неверная версия релиза: $VERSION";; esac
+    pre_ok "версия" "$VERSION"
+    NAME="netbird_${VERSION}_linux_${UARCH}.tar.gz"
+    BASE="https://github.com/netbirdio/netbird/releases/download/v${VERSION}"
+    if curl -fsSI --max-time 20 -o /dev/null "$BASE/$NAME" 2>/dev/null; then
+      pre_ok "релиз на GitHub" "$NAME"
+    else
+      if http_ok "https://github.com" 2>/dev/null; then
+        fail "на GitHub нет $NAME (версия $VERSION, архитектура $UARCH): проверь NB_VERSION/NB_ARCH"
+      else
+        fail "GitHub недоступен: проверь интернет на роутере"
+      fi
+    fi
+  else
+    opkg list 2>/dev/null | grep -q '^netbird ' || fail "пакета netbird нет в репозитории Entware для $(uname -m)"
+    pre_ok "пакет netbird в репозитории" ""
+  fi
+  FREE_KB=$(df -k /opt | awk 'END {print $4}')
+  if [ -n "${NB_COMPRESS:-}" ]; then NEED_WARN_KB=20000; else NEED_WARN_KB=40000; fi
+  if [ "${FREE_KB:-0}" -lt "$NEED_WARN_KB" ]; then
+    pre_warn "/opt свободно" "${FREE_KB} КБ (маловато; выручает NB_COMPRESS=1)"
+  else
+    pre_ok "/opt свободно" "${FREE_KB} КБ"
+  fi
+  if [ -z "$NB_NO_UP" ]; then
+    mgmt_probe
+  else
+    pre_skip "management $MGMT" "(не нужен: NB_NO_UP)"
+  fi
+}
+
+install_keenetic() {
+  if [ -t 1 ]; then clear 2>/dev/null || true; fi
+  banner "NetBird на Keenetic — установка"
+  preflight_keenetic
 
   log "[1/5] Keenetic/Entware, архитектура $(uname -m), ядро $(uname -r), источник: $SOURCE"
   if [ "$SOURCE" = upstream ]; then
@@ -214,8 +341,6 @@ install_entware_binary() {
   if [ -x /opt/lib/netbird/netbird ]; then
     fail "найден upstream-бинарь /opt/lib/netbird/netbird; сначала удали его через uninstall.sh"
   fi
-  opkg update >/dev/null
-  opkg list 2>/dev/null | grep -q '^netbird ' || fail "пакета netbird нет в репозитории Entware для $(uname -m)"
   log "[2/5] пакеты: netbird iptables cron"
   opkg install netbird iptables cron
   log "флаги демона -> /opt/etc/netbird/env"
@@ -234,13 +359,12 @@ install_upstream_binary() {
   for cmd in sha256sum tar awk mktemp sysctl; do
     command -v "$cmd" >/dev/null || fail "нет утилиты: $cmd"
   done
-  if ! command -v curl >/dev/null; then opkg update >/dev/null; opkg install curl ca-bundle; fi
+  if ! command -v curl >/dev/null; then opkg install curl ca-bundle >/dev/null 2>&1 || fail "не ставится curl"; fi
   command -v curl >/dev/null || fail "не ставится curl"
-  if ! command -v timeout >/dev/null; then opkg update >/dev/null; opkg install coreutils-timeout; fi
+  if ! command -v timeout >/dev/null; then opkg install coreutils-timeout >/dev/null 2>&1 || fail "не ставится coreutils-timeout"; fi
   command -v timeout >/dev/null || fail "coreutils-timeout не дал timeout"
   opkg install iptables cron >/dev/null
 
-  VERSION=$(resolve_version)
   case "$VERSION" in ''|*[!0-9.]*) fail "неверная версия релиза: $VERSION";; esac
 
   LOCK=/opt/var/lock/netbird-install
@@ -275,13 +399,34 @@ install_upstream_binary() {
   chmod 700 "$TMP/netbird"
   ACTUAL=$(timeout 15 "$TMP/netbird" version) || fail "бинарь не запустился (возможно, чужая архитектура $UARCH)"
   [ "$ACTUAL" = "$VERSION" ] || fail "версия бинаря $ACTUAL не совпала с $VERSION"
-  BYTES=$(wc -c < "$TMP/netbird")
+  NB_SRC_BIN="$TMP/netbird"
+  if [ -n "${NB_COMPRESS:-}" ]; then
+    log "мало места: сжимаю бинарь (UPX)"
+    if ! command -v upx >/dev/null; then opkg install upx >/dev/null 2>&1 || fail "не ставится upx (нужен для NB_COMPRESS=1)"; fi
+    command -v upx >/dev/null || fail "не ставится upx (нужен для NB_COMPRESS=1)"
+    cp "$TMP/netbird" "$TMP/netbird-packed" || fail "нет места в /tmp для сжатия"
+    upx --best -q "$TMP/netbird-packed" || fail "upx не смог сжать бинарь"
+    timeout 15 "$TMP/netbird-packed" version >/dev/null 2>&1 || fail "сжатый бинарь не запустился"
+    NB_SRC_BIN="$TMP/netbird-packed"
+    log "сжато: $(($(wc -c < "$TMP/netbird") / 1024)) -> $(($(wc -c < "$TMP/netbird-packed") / 1024)) КБ"
+  fi
+  BYTES=$(wc -c < "$NB_SRC_BIN")
   free_kib() { df -k /opt | awk 'END {print $4}'; }
   FS=$(awk '$2 == "/opt" {print $3}' /proc/mounts)
+  OLD_BIN=/opt/lib/netbird/netbird
   FREE=$(free_kib)
+  NEED_KB=$(( (BYTES + 1023) / 1024 + 4096 ))
+  # Переустановка на забитом томе: демон уже остановлен проверкой выше, тарболл
+  # проверен и лежит в /tmp — старый бинарь удаляем ДО записи нового, пик = один файл.
+  # Identity в /opt/var/lib/netbird не трогаем; в худшем случае скрипт перезапускается.
+  if [ -f "$OLD_BIN" ] && [ "${FREE:-0}" -le "$NEED_KB" ]; then
+    log "места впритык (свободно ${FREE} КБ): удаляю старый бинарь до записи нового"
+    rm -f "$OLD_BIN" || fail "не удаляется старый бинарь $OLD_BIN"
+    FREE=$(free_kib)
+  fi
   # UBIFS сжимает при записи; меряем занятое место, а не гадаем коэффициент.
   if [ "$FS" != ubifs ]; then
-    [ "$FREE" -gt "$(( (BYTES + 1023) / 1024 + 4096 ))" ] || fail "мало места: нужен атомарный инсталл плюс резерв 4 MiB"
+    [ "${FREE:-0}" -gt "$NEED_KB" ] || fail "мало места: свободно ${FREE:-?} КБ, нужно $NEED_KB КБ (NB_COMPRESS=1 ужмёт бинарь до ~14 МБ)"
   fi
   mkdir -p /opt/lib/netbird /opt/bin /opt/var/lib/netbird /opt/var/run
   chmod 700 /opt/var/lib/netbird
@@ -292,15 +437,15 @@ install_upstream_binary() {
     while [ "$OFFSET" -lt "$CHUNKS" ]; do
       # Резерв 4 MiB плюс 2 MiB на следующий кусок в 1 MiB и накладные расходы ФС.
       [ "$(free_kib)" -ge 6144 ] || fail "достигнут резерв UBIFS; стейджинг удалён, прежний бинарь цел"
-      dd if="$TMP/netbird" bs=1048576 skip="$OFFSET" count=1 >> "$STAGE" 2>/dev/null || fail "ошибка записи стейджинга"
+      dd if="$NB_SRC_BIN" bs=1048576 skip="$OFFSET" count=1 >> "$STAGE" 2>/dev/null || fail "ошибка записи стейджинга"
       sync
       [ "$(free_kib)" -ge 4096 ] || fail "на UBIFS меньше резерва 4 MiB"
       OFFSET=$((OFFSET+1))
     done
   else
-    cp "$TMP/netbird" "$STAGE"
+    cp "$NB_SRC_BIN" "$STAGE"
   fi
-  EXPECTED=$(sha256sum "$TMP/netbird" | awk '{print $1}')
+  EXPECTED=$(sha256sum "$NB_SRC_BIN" | awk '{print $1}')
   printf '%s  %s\n' "$EXPECTED" "$STAGE" | sha256sum -c -
   chmod 755 "$STAGE"
   mv "$STAGE" /opt/lib/netbird/netbird
@@ -354,19 +499,53 @@ INIT
 }
 
 # ---------------------------------------------------------------- OpenWrt
+preflight_openwrt() {
+  banner "Предпроверки: убеждаемся, что установка вообще возможна"
+  [ "$(id -u)" = 0 ] || fail "нужен root"
+  pre_ok "root" ""
+  if [ -c /dev/net/tun ]; then
+    pre_ok "/dev/net/tun" ""
+  elif [ -n "$NB_NO_UP" ]; then
+    pre_skip "/dev/net/tun" "(нет, но NB_NO_UP)"
+  else
+    fail "нет /dev/net/tun (нужен kmod-tun)"
+  fi
+  if [ -z "$NB_NO_UP" ]; then
+    if [ -z "$SCRIPT_KEY" ] && [ ! -s "${NB_SETUP_KEY_FILE:-}" ]; then
+      fail "нужен Setup Key: sh install.sh <SETUP_KEY> [MANAGEMENT_URL]"
+    fi
+    pre_ok "Setup Key" "(значение не показываю)"
+  else
+    pre_skip "Setup Key" "(не нужен: NB_NO_UP)"
+  fi
+  check_hostname
+  if command -v apk >/dev/null 2>&1; then
+    apk update >/dev/null 2>&1 || fail "apk update не удался: проверь интернет на роутере"
+    pre_ok "apk update" ""
+  else
+    opkg update >/dev/null 2>&1 || fail "opkg update не удался: проверь интернет на роутере"
+    pre_ok "opkg update" ""
+  fi
+  if [ -z "$NB_NO_UP" ]; then
+    mgmt_probe
+  else
+    pre_skip "management $MGMT" "(не нужен: NB_NO_UP)"
+  fi
+}
+
 install_openwrt() {
   if [ "${NB_SOURCE:-auto}" = upstream ]; then fail "upstream-источник на OpenWrt пока не поддерживается; убери NB_SOURCE=upstream"; fi
   # shellcheck disable=SC1091
   . /etc/openwrt_release
+  if [ -t 1 ]; then clear 2>/dev/null || true; fi
+  banner "NetBird на OpenWrt — установка"
+  preflight_openwrt
   log "[1/5] OpenWrt $DISTRIB_RELEASE ($DISTRIB_ARCH)"
-  [ -c /dev/net/tun ] || [ -n "$NB_NO_UP" ] || fail "нет /dev/net/tun (нужен kmod-tun)"
 
   log "[2/5] пакет netbird"
   if command -v apk >/dev/null 2>&1; then
-    apk update >/dev/null
     apk add netbird
   else
-    opkg update >/dev/null
     opkg install netbird
   fi
 
