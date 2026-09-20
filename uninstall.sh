@@ -2,7 +2,7 @@
 # Полное удаление NetBird, поставленного install.sh (Keenetic/Entware или OpenWrt).
 # Убирает оба источника бинаря (пакет Entware и upstream), хук, watchdog, uci-объекты и состояние.
 set -e
-export PATH=/opt/bin:/opt/sbin:$PATH
+export PATH="/opt/bin:/opt/sbin:$PATH"
 netbird down 2>/dev/null || true
 if [ -f /etc/openwrt_release ] && [ -z "$NB_PLATFORM" ] || [ "$NB_PLATFORM" = openwrt ]; then
   /etc/init.d/netbird stop 2>/dev/null || true

@@ -155,6 +155,7 @@ NetBird-IP роутера скрипт печатает в конце; всег�
 | `NB_ARCH` | по `uname -m` | принудительная архитектура upstream-бинаря (экспертный режим) |
 | `NB_SETUP_KEY_FILE` | | файл с Setup Key вместо первого аргумента |
 | `NB_MANAGEMENT_URL` | `https://api.netbird.io` | то же, что второй аргумент |
+| `NB_LOG_LEVEL` | `warning` | уровень лога демона на Keenetic; для отладки `info` или `debug` |
 | `NB_LAN` | `br0` | LAN-интерфейс Keenetic (для гостевого сегмента другой) |
 | `NB_PORTS` | `22 222 80 443` | порты роутера, открываемые из сети NetBird (Keenetic) |
 | `NB_UP_FLAGS` | | дополнительные флаги к `netbird up`, например `--disable-firewall` |
@@ -206,6 +207,7 @@ curl -fsSL https://raw.githubusercontent.com/kalpakprod/netbird-keenetic-openwrt
 - `--disable-dns` включён всегда: NetBird DNS (резолв имён пиров `*.netbird.cloud`) на роутере не работает. Имена пиров резолвятся на других устройствах, роутеру они не нужны.
 - Политики доступа NetBird применяются на management-стороне и на пирах; сам роутер фильтрует входящий из mesh трафик только по `NB_PORTS`.
 - Keenetic с 128 MB RAM: бинарь netbird занимает ~35-40 MB на диске и 30-60 MB в памяти. На таких моделях watchdog нужен, OOM реален.
+- Лог демона (`/opt/var/log/netbird.log`) пишется с уровнем `warning` и обрезается watchdog'ом свыше 1 МБ до хвоста 512 КБ, чтобы INFO-шум (~1.5 МБ/час) не съедал флешь. Для детальной диагностики ставь с `NB_LOG_LEVEL=info` (или `debug`).
 
 ## Источники
 

@@ -9,6 +9,7 @@
 #   NB_VERSION=0.79.0|latest       версия upstream-релиза (по умолчанию проверенная; latest резолвится
 #                              через GitHub API с откатом на проверенную при неудаче)
 #   NB_ARCH=arm64                  принудительно выбрать архитектуру upstream-бинаря (экспертный режим)
+#   NB_LOG_LEVEL=warning           уровень лога демона на Keenetic: trace|debug|info|warn|warning|error
 #   NB_SETUP_KEY_FILE=/path        файл с Setup Key (вместо первого аргумента)
 #   NB_LAN=br0                     LAN-интерфейс Keenetic (по умолчанию br0)
 #   NB_PORTS="22 222 80 443"       порты роутера, открываемые из сети NetBird (Keenetic)
@@ -22,8 +23,9 @@ NB_PORTS="${NB_PORTS:-22 222 80 443}"
 NB_NET=100.64.0.0/10
 NB_SOURCE="${NB_SOURCE:-auto}"
 NB_VERSION="${NB_VERSION:-0.79.0}"
+NB_LOG_LEVEL="${NB_LOG_LEVEL:-warning}"
 PINNED_VERSION=0.79.0
-export PATH=/opt/bin:/opt/sbin:$PATH
+export PATH="/opt/bin:/opt/sbin:$PATH"
 
 log()  { printf '%s\n' "$*"; }
 fail() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
@@ -149,6 +151,13 @@ install_watchdog() {
   mkdir -p /opt/etc/netbird /opt/var/log
   cat > "$WD" <<'EOF_WD'
 #!/bin/sh
+# Лог без ротации за сутки съедает маленькую флешь: режем свыше 1 МБ до 512 КБ.
+# Копированием в тот же inode (copytruncate): демон продолжает писать в тот же файл.
+LOG=/opt/var/log/netbird.log
+if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1048576 ]; then
+  tail -c 524288 "$LOG" > "$LOG.tmp" && cat "$LOG.tmp" > "$LOG"
+  rm -f "$LOG.tmp"
+fi
 pidof netbird >/dev/null && exit 0
 echo "$(date) netbird not running, restarting" >> /opt/var/log/netbird_watchdog.log
 /opt/etc/init.d/S99netbird restart
@@ -171,6 +180,7 @@ install_keenetic() {
     fi
   fi
   case "$NB_SOURCE" in auto|upstream|entware) ;; *) fail "NB_SOURCE: auto|upstream|entware" ;; esac
+  case "$NB_LOG_LEVEL" in trace|debug|info|warn|warning|error) ;; *) fail "NB_LOG_LEVEL: trace|debug|info|warn|warning|error" ;; esac
 
   SOURCE="$NB_SOURCE"
   UARCH=""
@@ -210,9 +220,9 @@ install_entware_binary() {
   opkg install netbird iptables cron
   log "флаги демона -> /opt/etc/netbird/env"
   mkdir -p /opt/etc/netbird /opt/var/log
-  cat > /opt/etc/netbird/env <<'EOF_FLAGS'
+  cat > /opt/etc/netbird/env <<EOF_FLAGS
 # читается штатным /opt/etc/init.d/S99netbird из пакета Entware
-FLAGS="--log-file /opt/var/log/netbird.log --log-level info"
+FLAGS="--log-file /opt/var/log/netbird.log --log-level $NB_LOG_LEVEL"
 EOF_FLAGS
 }
 
@@ -316,7 +326,7 @@ case "${1:-}" in
   running && exit 0
   mkdir -p /opt/var/run /opt/var/log
   umask 077
-  /opt/bin/netbird service run --log-file /opt/var/log/netbird.log >/dev/null 2>&1 &
+  /opt/bin/netbird service run --log-file /opt/var/log/netbird.log --log-level @NB_LOG_LEVEL@ >/dev/null 2>&1 &
   echo "$!" > "$PIDFILE"
   i=0
   while [ "$i" -lt 30 ]; do
@@ -339,6 +349,7 @@ case "${1:-}" in
  *) echo 'Usage: start|stop|restart|status' >&2; exit 2;;
 esac
 INIT
+  sed -i "s/@NB_LOG_LEVEL@/$NB_LOG_LEVEL/" /opt/etc/init.d/S99netbird
   chmod 755 /opt/etc/init.d/S99netbird
 }
 

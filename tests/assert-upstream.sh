@@ -12,6 +12,8 @@ ok "upstream netbird $V"
 ok "враппер /opt/bin/netbird"
 [ -x /opt/etc/init.d/S99netbird ] || die "нет S99netbird"
 grep -q 'netbird-upstream.pid' /opt/etc/init.d/S99netbird || die "S99netbird не upstream-вариант"
+grep -q -- '--log-level' /opt/etc/init.d/S99netbird || die "в S99netbird нет --log-level"
+grep -q '@NB_LOG_LEVEL@' /opt/etc/init.d/S99netbird && die "токен @NB_LOG_LEVEL@ не подставлен"
 ok "S99netbird (upstream-вариант)"
 H=/opt/etc/ndm/netfilter.d/netbird.sh
 [ -x "$H" ] || die "нет хука $H"
@@ -31,6 +33,12 @@ sleep 3
 pidof netbird >/dev/null || die "демон netbird не запущен через S99netbird"
 ok "демон запущен (pid $(pidof netbird))"
 /opt/bin/netbird status 2>&1 | head -3 | sed 's/^/      /'
+# watchdog режет раздувшийся лог (защита маленькой флеши)
+grep -q '1048576' /opt/etc/netbird/watchdog.sh || die "в watchdog нет трима лога"
+head -c 1500000 /dev/zero > /opt/var/log/netbird.log
+/opt/etc/netbird/watchdog.sh
+[ "$(wc -c < /opt/var/log/netbird.log)" -lt 1048576 ] || die "watchdog не обрезал лог"
+ok "watchdog режет лог свыше 1 МБ"
 /opt/etc/init.d/S99netbird stop >/dev/null; sleep 1
 pidof netbird >/dev/null && die "демон не остановился"
 [ -e /opt/var/run/netbird-upstream.pid ] && die "pidfile не убран после stop"

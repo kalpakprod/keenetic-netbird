@@ -6,6 +6,7 @@ die() { echo "  FAIL $*"; exit 1; }
 ok "netbird $(/opt/sbin/netbird version 2>/dev/null || echo '?')"
 [ -x /opt/etc/init.d/S99netbird ] || die "нет S99netbird (автозапуск Entware)"
 grep -q 'FLAGS=' /opt/etc/netbird/env || die "нет /opt/etc/netbird/env"
+grep -q -- '--log-level' /opt/etc/netbird/env || die "в env нет --log-level"
 ok "S99netbird + env"
 H=/opt/etc/ndm/netfilter.d/netbird.sh
 [ -x "$H" ] || die "нет хука $H"
@@ -26,6 +27,12 @@ sleep 3
 pidof netbird >/dev/null || die "демон netbird не запущен через S99netbird"
 ok "демон запущен (pid $(pidof netbird))"
 /opt/sbin/netbird status 2>&1 | head -3 | sed 's/^/      /'
+# watchdog режет раздувшийся лог (защита маленькой флеши)
+grep -q '1048576' /opt/etc/netbird/watchdog.sh || die "в watchdog нет трима лога"
+head -c 1500000 /dev/zero > /opt/var/log/netbird.log
+/opt/etc/netbird/watchdog.sh
+[ "$(wc -c < /opt/var/log/netbird.log)" -lt 1048576 ] || die "watchdog не обрезал лог"
+ok "watchdog режет лог свыше 1 МБ"
 # перезапуск (эмуляция reboot Entware): S99 stop/start, состояние в /opt сохраняется
 /opt/etc/init.d/S99netbird stop >/dev/null; sleep 1
 pidof netbird >/dev/null && die "демон не остановился"
