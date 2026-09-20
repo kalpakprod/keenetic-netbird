@@ -10,7 +10,7 @@
 #                              через GitHub API с откатом на проверенную при неудаче)
 #   NB_ARCH=arm64                  принудительно выбрать архитектуру upstream-бинаря (экспертный режим)
 #   NB_LOG_LEVEL=warning           уровень лога демона на Keenetic: trace|debug|info|warn|warning|error
-#   NB_COMPRESS=1                сжать upstream-бинарь через UPX (~40 МБ -> ~14 МБ) для тесного /opt
+#   NB_COMPRESS=1                сжать upstream-бинарь через UPX (~40 МБ -> ~15 МБ) для тесного /opt
 #   NB_HOSTNAME=peer-01            имя пира в панели NetBird (A-Z a-z 0-9 . _ -)
 #   NB_SETUP_KEY_FILE=/path        файл с Setup Key (вместо первого аргумента)
 #   NB_LAN=br0                     LAN-интерфейс Keenetic (по умолчанию br0)
@@ -405,7 +405,8 @@ install_upstream_binary() {
     if ! command -v upx >/dev/null; then opkg install upx >/dev/null 2>&1 || fail "не ставится upx (нужен для NB_COMPRESS=1)"; fi
     command -v upx >/dev/null || fail "не ставится upx (нужен для NB_COMPRESS=1)"
     cp "$TMP/netbird" "$TMP/netbird-packed" || fail "нет места в /tmp для сжатия"
-    upx --best -q "$TMP/netbird-packed" || fail "upx не смог сжать бинарь"
+    # Дефолтный уровень: --best на слабом ARM пакует 40 МБ 30+ минут ради ~1 МБ (замерено на KN-1010).
+    upx -q "$TMP/netbird-packed" || fail "upx не смог сжать бинарь"
     timeout 15 "$TMP/netbird-packed" version >/dev/null 2>&1 || fail "сжатый бинарь не запустился"
     NB_SRC_BIN="$TMP/netbird-packed"
     log "сжато: $(($(wc -c < "$TMP/netbird") / 1024)) -> $(($(wc -c < "$TMP/netbird-packed") / 1024)) КБ"
@@ -426,7 +427,7 @@ install_upstream_binary() {
   fi
   # UBIFS сжимает при записи; меряем занятое место, а не гадаем коэффициент.
   if [ "$FS" != ubifs ]; then
-    [ "${FREE:-0}" -gt "$NEED_KB" ] || fail "мало места: свободно ${FREE:-?} КБ, нужно $NEED_KB КБ (NB_COMPRESS=1 ужмёт бинарь до ~14 МБ)"
+    [ "${FREE:-0}" -gt "$NEED_KB" ] || fail "мало места: свободно ${FREE:-?} КБ, нужно $NEED_KB КБ (NB_COMPRESS=1 ужмёт бинарь до ~15 МБ)"
   fi
   mkdir -p /opt/lib/netbird /opt/bin /opt/var/lib/netbird /opt/var/run
   chmod 700 /opt/var/lib/netbird
