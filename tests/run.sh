@@ -65,6 +65,24 @@ run_upstream() {
     /opt/bin/netbird version >/dev/null 2>&1 || { echo "сжатый бинарь не запускается"; exit 1; }
     rm -f /tmp/fakebin/df
     echo "Compress+tight: OK ($SZ байт)"
+    echo "--- watchdog respects installer lock (F1)"
+    /opt/etc/init.d/S99netbird stop >/dev/null; sleep 1
+    pidof netbird >/dev/null && { echo "daemon still running before lock test"; exit 1; } || true
+    mkdir -p /opt/var/lock/netbird-install
+    /opt/etc/netbird/watchdog.sh
+    pidof netbird >/dev/null && { echo "watchdog restarted daemon under lock"; exit 1; } || true
+    rmdir /opt/var/lock/netbird-install
+    /opt/etc/netbird/watchdog.sh; sleep 3
+    pidof netbird >/dev/null || { echo "watchdog did not restart after unlock"; exit 1; }
+    echo "Watchdog-lock: OK"
+    echo "--- S99 heals stale pidfile (F2)"
+    echo 999999 > /opt/var/run/netbird-upstream.pid
+    /opt/etc/init.d/S99netbird restart >/dev/null; sleep 3
+    P=$(cat /opt/var/run/netbird-upstream.pid)
+    kill -0 "$P" 2>/dev/null || { echo "pidfile $P dead after restart"; exit 1; }
+    [ "$(readlink /proc/$P/exe)" = /opt/lib/netbird/netbird ] || { echo "pidfile $P is not our daemon"; exit 1; }
+    pidof netbird >/dev/null || { echo "daemon not running after heal"; exit 1; }
+    echo "S99-heal: OK"
     NB_PLATFORM=keenetic sh /tmp/uninstall.sh
     ! test -e /opt/lib/netbird/netbird || { echo "upstream-бинарь остался"; exit 1; }
     ! test -e /opt/bin/netbird || { echo "враппер остался"; exit 1; }

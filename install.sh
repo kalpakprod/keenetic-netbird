@@ -10,7 +10,7 @@
 #                              через GitHub API с откатом на проверенную при неудаче)
 #   NB_ARCH=arm64                  принудительно выбрать архитектуру upstream-бинаря (экспертный режим)
 #   NB_LOG_LEVEL=warning           уровень лога демона на Keenetic: trace|debug|info|warn|warning|error
-#   NB_COMPRESS=1                сжать upstream-бинарь через UPX (~40 МБ -> ~15 МБ) для тесного /opt
+#   NB_COMPRESS=1                сжать upstream-бинарь через UPX (~40 МБ -> ~13-15 МБ) для тесного /opt
 #   NB_HOSTNAME=peer-01            имя пира в панели NetBird (A-Z a-z 0-9 . _ -)
 #   NB_SETUP_KEY_FILE=/path        файл с Setup Key (вместо первого аргумента)
 #   NB_LAN=br0                     LAN-интерфейс Keenetic (по умолчанию br0)
@@ -213,6 +213,9 @@ install_watchdog() {
   mkdir -p /opt/etc/netbird /opt/var/log
   cat > "$WD" <<'EOF_WD'
 #!/bin/sh
+# Пока установщик держит lock, демона не трогаем: рестарт посреди стейджинга
+# меняет бинарь под живым процессом и портит pidfile (поймано на железе).
+[ -d /opt/var/lock/netbird-install ] && exit 0
 # Лог без ротации за сутки съедает маленькую флешь: режем свыше 1 МБ до 512 КБ.
 # Копированием в тот же inode (copytruncate): демон продолжает писать в тот же файл.
 LOG=/opt/var/log/netbird.log
@@ -427,7 +430,7 @@ install_upstream_binary() {
   fi
   # UBIFS сжимает при записи; меряем занятое место, а не гадаем коэффициент.
   if [ "$FS" != ubifs ]; then
-    [ "${FREE:-0}" -gt "$NEED_KB" ] || fail "мало места: свободно ${FREE:-?} КБ, нужно $NEED_KB КБ (NB_COMPRESS=1 ужмёт бинарь до ~15 МБ)"
+    [ "${FREE:-0}" -gt "$NEED_KB" ] || fail "мало места: свободно ${FREE:-?} КБ, нужно $NEED_KB КБ (NB_COMPRESS=1 ужмёт бинарь до ~13-15 МБ)"
   fi
   mkdir -p /opt/lib/netbird /opt/bin /opt/var/lib/netbird /opt/var/run
   chmod 700 /opt/var/lib/netbird
@@ -474,21 +477,44 @@ case "${1:-}" in
   umask 077
   /opt/bin/netbird service run --log-file /opt/var/log/netbird.log --log-level @NB_LOG_LEVEL@ >/dev/null 2>&1 &
   echo "$!" > "$PIDFILE"
-  i=0
+  i=0; UP=0
   while [ "$i" -lt 30 ]; do
-    if timeout 3 /opt/bin/netbird status >/dev/null 2>&1; then exit 0; fi
+    if timeout 3 /opt/bin/netbird status >/dev/null 2>&1; then UP=1; break; fi
     running || exit 1
     sleep 1; i=$((i+1))
   done
+  [ "$UP" = 1 ] || exit 1
+  running && exit 0
+  # Сокет отвечает, а наш потомок мёртв (второй экземпляр не встал на занятый сокет):
+  # забираем живой PID вместо мёртвого, иначе stop станет no-op навсегда.
+  for p in $(pidof netbird 2>/dev/null); do
+    case "$(readlink "/proc/$p/exe" 2>/dev/null)" in
+      /opt/lib/netbird/netbird*) echo "$p" > "$PIDFILE"; exit 0;;
+    esac
+  done
   exit 1;;
  stop)
-  running || exit 0
-  kill "$PID" || exit 1
-  i=0
-  while running; do
-    [ "$i" -lt 30 ] || exit 1
-    sleep 1; i=$((i+1))
-  done
+  if running; then
+    kill "$PID" || exit 1
+    i=0
+    while running; do
+      [ "$i" -lt 30 ] || exit 1
+      sleep 1; i=$((i+1))
+    done
+  else
+    # pidfile врёт (гонка, ручной kill): добиваем по exe, иначе restart плодит дубли.
+    # Префикс покрывает и "(deleted)" после горячей замены бинаря.
+    for p in $(pidof netbird 2>/dev/null); do
+      case "$(readlink "/proc/$p/exe" 2>/dev/null)" in
+        /opt/lib/netbird/netbird*) kill "$p" 2>/dev/null;;
+      esac
+    done
+    i=0
+    while pidof netbird >/dev/null 2>&1; do
+      [ "$i" -lt 30 ] || exit 1
+      sleep 1; i=$((i+1))
+    done
+  fi
   rm -f "$PIDFILE";;
  restart) "$0" stop && "$0" start;;
  status) running;;
