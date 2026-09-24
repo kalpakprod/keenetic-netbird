@@ -17,6 +17,7 @@
 #   NB_PORTS="22 222 80 443"       порты роутера, открываемые из сети NetBird (Keenetic)
 #   NB_UP_FLAGS="..."              дополнительные флаги к "netbird up"
 #   NB_SKIP_PREFLIGHT=1            не останавливаться, если management недоступен (экспертный режим)
+#   NB_GOMEMLIMIT=auto|off|48MiB   лимит памяти демона Go (auto: GOGC=50 GOMEMLIMIT=32MiB при RAM < 512 МБ)
 set -e
 
 SCRIPT_KEY="$1"
@@ -180,15 +181,19 @@ install_hook() {
     printf 'IPT=/opt/sbin/iptables\nNB_NET=%s\nLAN=%s\nPORTS="%s"\n' "$NB_NET" "$NB_LAN" "$NB_PORTS"
     cat <<'EOF_HOOK'
 add() { $IPT "$@" 2>/dev/null; }
+# Правило всегда наверху цепочки: NetBird при старте вставляет в INPUT свой
+# "-i wt0 -j DROP" выше чужих правил, и "-C || -I" оставлял наши ACCEPT под ним
+# (поймано на железе: 80/443 молча не пускало). Удаляем все копии и вставляем первым.
+top() { ch=$1; shift; while add -D "$ch" "$@"; do :; done; add -I "$ch" 1 "$@"; }
 case "$table" in
   filter)
     # ответы через туннель не должны отбрасываться как асимметричные
     for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$f" 2>/dev/null; done
     # доступ к самому роутеру из сети NetBird
-    add -C INPUT -i wt0 -p icmp -j ACCEPT || add -I INPUT 1 -i wt0 -p icmp -j ACCEPT
     for p in $PORTS; do
-      add -C INPUT -i wt0 -p tcp --dport "$p" -j ACCEPT || add -I INPUT 1 -i wt0 -p tcp --dport "$p" -j ACCEPT
+      top INPUT -i wt0 -p tcp --dport "$p" -j ACCEPT
     done
+    top INPUT -i wt0 -p icmp -j ACCEPT
     # доступ из NetBird в домашнюю сеть
     add -C FORWARD -i wt0 -o "$LAN" -j ACCEPT || add -I FORWARD 1 -i wt0 -o "$LAN" -j ACCEPT
     add -C FORWARD -i "$LAN" -o wt0 -m state --state RELATED,ESTABLISHED -j ACCEPT || \
@@ -219,7 +224,13 @@ export PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # рестартит живой демон каждые 2 минуты (поймано на железе).
 # Пока установщик держит lock, демона не трогаем: рестарт посреди стейджинга
 # меняет бинарь под живым процессом и портит pidfile (поймано на железе).
-[ -d /opt/var/lock/netbird-install ] && exit 0
+if [ -d /opt/var/lock/netbird-install ]; then
+  # lock живого установщика: не мешаем. Lock убитого (OOM, kill -9) не должен выключать watchdog навсегда.
+  P=$(cat /opt/var/lock/netbird-install/pid 2>/dev/null)
+  [ -n "$P" ] && kill -0 "$P" 2>/dev/null && exit 0
+  # Lock без pid (старая версия установщика): уважаем, пока он моложе 30 минут.
+  [ -z "$P" ] && [ -n "$(find /opt/var/lock/netbird-install -maxdepth 0 -mmin -30 2>/dev/null)" ] && exit 0
+fi
 # Лог без ротации за сутки съедает маленькую флешь: режем свыше 1 МБ до 512 КБ.
 # Копированием в тот же inode (copytruncate): демон продолжает писать в тот же файл.
 LOG=/opt/var/log/netbird.log
@@ -227,6 +238,9 @@ if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1048576 ]; then
   tail -c 524288 "$LOG" > "$LOG.tmp" && cat "$LOG.tmp" > "$LOG"
   rm -f "$LOG.tmp"
 fi
+# NetBird при каждом (пере)подключении снова вставляет свой DROP для wt0 выше наших
+# ACCEPT; хук идемпотентен и поднимает их наверх (без этого 80/443 из mesh закрыты).
+[ -x /opt/etc/ndm/netfilter.d/netbird.sh ] && table=filter /opt/etc/ndm/netfilter.d/netbird.sh
 pidof netbird >/dev/null && exit 0
 echo "$(date) netbird not running, restarting" >> /opt/var/log/netbird_watchdog.log
 /opt/etc/init.d/S99netbird restart
@@ -307,9 +321,18 @@ preflight_keenetic() {
     pre_ok "пакет netbird в репозитории" ""
   fi
   FREE_KB=$(df -k /opt | awk 'END {print $4}')
-  if [ -n "${NB_COMPRESS:-}" ]; then NEED_WARN_KB=20000; else NEED_WARN_KB=40000; fi
+  OPT_FS=$(awk '$2 == "/opt" {print $3}' /proc/mounts)
+  if [ "$OPT_FS" = ubifs ]; then
+    # UBIFS сжимает при записи: несжатый 40 МБ бинарь занимает ~17 МБ (замерено на AX3000T).
+    NEED_WARN_KB=20000
+    HINT="на UBIFS нужно ~20 МБ; NB_COMPRESS тут обычно не нужен и стоит ~40 МБ RAM"
+  elif [ -n "${NB_COMPRESS:-}" ]; then
+    NEED_WARN_KB=20000; HINT="маловато даже со сжатием"
+  else
+    NEED_WARN_KB=40000; HINT="маловато; выручает NB_COMPRESS=1 (цена: ~40 МБ RAM)"
+  fi
   if [ "${FREE_KB:-0}" -lt "$NEED_WARN_KB" ]; then
-    pre_warn "/opt свободно" "${FREE_KB} КБ (маловато; выручает NB_COMPRESS=1)"
+    pre_warn "/opt свободно" "${FREE_KB} КБ ($HINT)"
   else
     pre_ok "/opt свободно" "${FREE_KB} КБ"
   fi
@@ -337,7 +360,11 @@ install_keenetic() {
   install_watchdog
 
   log "[4/5] запуск демона"
-  /opt/etc/init.d/S99netbird restart
+  if ! /opt/etc/init.d/S99netbird restart; then
+    log "демон не поднялся с первого раза, повторяю"
+    sleep 5
+    /opt/etc/init.d/S99netbird restart || fail "демон не запустился. Смотри: tail -50 /opt/var/log/netbird.log; нехватку памяти: dmesg | grep -i oom"
+  fi
   netbird version
 
   log "[5/5] регистрация пира"
@@ -376,14 +403,25 @@ install_upstream_binary() {
 
   LOCK=/opt/var/lock/netbird-install
   mkdir -p /opt/var/lock
-  mkdir "$LOCK" 2>/dev/null || fail "установщик уже запущен или остался lock $LOCK"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    # Lock от убитого установщика (OOM, обрыв SSH, kill -9): trap EXIT не сработал.
+    # Живой владелец -> отказ; мёртвый или без pid -> убираем и продолжаем.
+    OLDPID=$(cat "$LOCK/pid" 2>/dev/null)
+    if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+      fail "установщик уже запущен (PID $OLDPID)"
+    fi
+    log "остался lock от прерванной установки: убираю $LOCK"
+    rm -rf "$LOCK"
+    mkdir "$LOCK" 2>/dev/null || fail "не создаётся lock $LOCK"
+  fi
+  echo "$$" > "$LOCK/pid"
   TMP=""
   STAGE=""
   # shellcheck disable=SC2317
   cleanup() {
     if [ -n "$STAGE" ]; then rm -f "$STAGE"; fi
     if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
-    rmdir "$LOCK"
+    rm -rf "$LOCK"
   }
   trap cleanup EXIT
   trap 'exit 130' INT
@@ -393,7 +431,16 @@ install_upstream_binary() {
   TMP=$(mktemp -d /tmp/netbird-install.XXXXXX)
   NAME="netbird_${VERSION}_linux_${UARCH}.tar.gz"
   BASE="https://github.com/netbirdio/netbird/releases/download/v${VERSION}"
-  fetch() { curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fLsS --connect-timeout 15 --max-time 180 --retry 2 "$1" -o "$2"; }
+  # curl --retry не повторяет ошибку DNS (код 6), а резолвер Keenetic на 127.0.0.1
+  # в первые секунды после смены DNS отвечает не всегда (timeout:1 attempts:1).
+  fetch() {
+    n=0
+    while [ $n -lt 4 ]; do
+      curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fLsS --connect-timeout 15 --max-time 180 --retry 2 "$1" -o "$2" && return 0
+      n=$((n+1)); sleep 3
+    done
+    return 1
+  }
   fetch "$BASE/$NAME" "$TMP/$NAME" || fail "не скачался $NAME (версия $VERSION, архитектура $UARCH)"
   fetch "$BASE/netbird_${VERSION}_checksums.txt" "$TMP/checksums" || fail "не скачался checksums для $VERSION"
   HASH=$(awk -v name="$NAME" '$2 == name || $2 == "*" name {print $1; n++} END {if(n!=1) exit 1}' "$TMP/checksums") || fail "нет однозначной контрольной суммы для $NAME"
@@ -408,6 +455,14 @@ install_upstream_binary() {
   [ "$ACTUAL" = "$VERSION" ] || fail "версия бинаря $ACTUAL не совпала с $VERSION"
   NB_SRC_BIN="$TMP/netbird"
   if [ -n "${NB_COMPRESS:-}" ]; then
+    # UPX на роутере: упаковка 40 МБ требует ~120 МБ свободной RAM, а сжатый бинарь
+    # при запуске целиком распаковывается в RAM (~40 МБ, не выгружается как страницы
+    # файла). На 256 МБ с sing-box/AWG Manager ядро убивало и upx, и демон (поймано на
+    # AX3000T). Проверяем заранее, пока ничего не тронуто.
+    MEM_KB=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)
+    if [ -n "$MEM_KB" ] && [ "$MEM_KB" -lt 122880 ]; then
+      fail "NB_COMPRESS=1: мало свободной RAM ($((MEM_KB / 1024)) МБ, нужно ~120 МБ). На UBIFS (/opt на встроенной флешке) запусти без NB_COMPRESS: флешь сжимает сама. Иначе освободи память (останови тяжёлые сервисы) или используй USB-накопитель"
+    fi
     log "мало места: сжимаю бинарь (UPX)"
     if ! command -v upx >/dev/null; then opkg install upx >/dev/null 2>&1 || fail "не ставится upx (нужен для NB_COMPRESS=1)"; fi
     command -v upx >/dev/null || fail "не ставится upx (нужен для NB_COMPRESS=1)"
@@ -458,11 +513,23 @@ install_upstream_binary() {
   chmod 755 "$STAGE"
   mv "$STAGE" /opt/lib/netbird/netbird
   STAGE=
-  cat > /opt/bin/netbird <<'WRAPPER'
-#!/bin/sh
-export NB_STATE_DIR=/opt/var/lib/netbird
-exec /opt/lib/netbird/netbird --daemon-addr unix:///opt/var/run/netbird.sock "$@"
-WRAPPER
+  # На роутерах до 512 МБ RAM рядом живут AWG Manager, sing-box и прочее: демон Go
+  # без ограничений держит ~50 МБ и под давлением памяти роутер уходит в своп и
+  # теряет DNS (поймано на AX3000T 256 МБ). GOGC/GOMEMLIMIT снижают кучу; NB_GOMEMLIMIT
+  # задаёт лимит вручную, NB_GOMEMLIMIT=off отключает.
+  MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+  GOENV=""
+  case "${NB_GOMEMLIMIT:-auto}" in
+    off) ;;
+    auto) if [ -n "$MEM_TOTAL_KB" ] && [ "$MEM_TOTAL_KB" -lt 524288 ]; then GOENV="export GOGC=50 GOMEMLIMIT=32MiB"; fi ;;
+    *[!0-9A-Za-z]*) fail "NB_GOMEMLIMIT: число с единицей (например 48MiB), auto или off" ;;
+    *) GOENV="export GOGC=50 GOMEMLIMIT=$NB_GOMEMLIMIT" ;;
+  esac
+  {
+    printf '#!/bin/sh\nexport NB_STATE_DIR=/opt/var/lib/netbird\n'
+    if [ -n "$GOENV" ]; then printf '%s\n' "$GOENV"; fi
+    printf 'exec /opt/lib/netbird/netbird --daemon-addr unix:///opt/var/run/netbird.sock "$@"\n'
+  } > /opt/bin/netbird
   chmod 755 /opt/bin/netbird
   cat > /opt/etc/init.d/S99netbird <<'INIT'
 #!/bin/sh
@@ -482,10 +549,14 @@ case "${1:-}" in
   /opt/bin/netbird service run --log-file /opt/var/log/netbird.log --log-level @NB_LOG_LEVEL@ >/dev/null 2>&1 &
   echo "$!" > "$PIDFILE"
   i=0; UP=0
-  while [ "$i" -lt 30 ]; do
-    if timeout 3 /opt/bin/netbird status >/dev/null 2>&1; then UP=1; break; fi
+  # До 90 с: на 256 МБ под нагрузкой демон поднимает сокет дольше 30 с. Каждый
+  # "netbird status" это новый процесс с 40 МБ бинарём: раз в секунду под нехваткой
+  # памяти он сам разгонял нагрузку до 28 и клал DNS роутера (поймано на AX3000T).
+  # Поэтому сначала дешёвая проверка сокета, status не чаще раза в 5 с.
+  while [ "$i" -lt 90 ]; do
     running || exit 1
-    sleep 1; i=$((i+1))
+    if [ -S /opt/var/run/netbird.sock ] && timeout 5 /opt/bin/netbird status >/dev/null 2>&1; then UP=1; break; fi
+    sleep 5; i=$((i+5))
   done
   [ "$UP" = 1 ] || exit 1
   running && exit 0
